@@ -1,0 +1,1 @@
+start powershell -NoExit -ExecutionPolicy bypass -Command "& cd '%~dp0';. .\tado-api.ps1"
