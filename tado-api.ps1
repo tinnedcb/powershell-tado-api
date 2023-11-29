@@ -60,19 +60,22 @@ function Get-TadoCredentials {
 }
 function Get-TadoSessionToken {
     param([switch] $Force)
-    if (!$script:TadoAuth -or $Force) {
+    if (!$script:TadoAuth -or
+        $script:TadoAuth.refreshTime -lt (Get-Date) -or 
+        $Force
+    ) {
         $Credentials = Get-TadoCredentials
         $headers = @{"Content-Type" = "application/x-www-form-urlencoded" }
         $clientSecret = "wZaRN7rpjn3FoNyF5IFuxg9uMzYJcvOoQ8QWiIqS3hfk6gLhVlG57j5YNoZL2Rtc"
         $body = "client_id=tado-web-app&grant_type=password&scope=home.user&username=$($Credentials.UserName)&password=$($Credentials.GetNetworkCredential().Password)&client_secret=$clientSecret"
         Write-Host "Getting Tado Session Authentication token... " -NoNewline
-        $script:TadoAuth = Invoke-RestMethod 'https://auth.tado.com/oauth/token' -Method 'POST' -Headers $headers -Body $body
-    
-        if ($script:TadoAuth) {
+        $authToken = Invoke-RestMethod 'https://auth.tado.com/oauth/token' -Method 'POST' -Headers $headers -Body $body
+        if ($authToken) {
+            $script:TadoAuth = $authToken | Add-Member -MemberType NoteProperty -Name "refreshTime" -Value (Get-Date).AddSeconds($authToken.expires_in - 10) -Force -PassThru
             Write-Host "Complete"
         }
         else {
-            throw "Faild to get Tado Authentication token. Please call Get-TadoSessionToken with your Tado credentials."
+            throw "Failed to get Tado Authentication token. Please call Get-TadoSessionToken with your Tado credentials."
         }
     }
     $script:TadoAuth
