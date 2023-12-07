@@ -58,7 +58,7 @@ function Get-TadoCredentials {
     }
     $Credentials
 }
-function Get-TadoSessionToken {
+function Get-TadoAuthToken {
     param([switch] $Force)
     if (!$script:TadoAuth -or
         $script:TadoAuth.refreshTime -lt (Get-Date) -or 
@@ -75,7 +75,7 @@ function Get-TadoSessionToken {
             Write-Host "Complete"
         }
         else {
-            throw "Failed to get Tado Authentication token. Please call Get-TadoSessionToken with your Tado credentials."
+            throw "Failed to get Tado Authentication token. Please call Get-TadoAuthToken with your Tado credentials."
         }
     }
     $script:TadoAuth
@@ -91,10 +91,66 @@ function Get-TadoApiCall {
     $uri = "https://my.tado.com/api/v2/$Path"
     $headers = @{
         "Accept"        = "application/json"
-        "Authorization" = "Bearer $((Get-TadoSessionToken).access_token)"
+        "Authorization" = "Bearer $((Get-TadoAuthToken).access_token)"
     }
     Write-Host "Calling $uri"
     Invoke-RestMethod -Uri $uri -Headers $headers
+}
+function Export-TadoMonthDataToFile{
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [datetime] $FromDate,
+        [datetime] $ToDate = (Get-Date),
+        [string] $FilePath
+    )
+    $ToDate = Get-Date -Year $ToDate.Year -Month $ToDate.Month -Day $ToDate.Day
+    
+    # Read existing files to check for missing months
+    # going back to the earliest date
+
+    if (!$FromDate) {
+        $FromDate = Get-Date -Year $ToDate.Year -Month $ToDate.Month -Day 1
+    }
+    $token = Get-TadoAuthToken -Force
+    Write-Host "Getting User details"
+    $userDetails = Get-TadoApiCall "me"
+    $homeId = $userDetails.homes.id
+    Write-Host "Getting Zones"
+    $zones = Get-TadoApiCall "homes/$homeid/zones"
+    
+    $earliestDate = ($zones.dateCreated | get-date | Measure-Object -Minimum).Minimum
+    $earliestMonthStart = Get-Date -Year $earliestDate.Year -Month $earliestDate.Month -Day 1
+    Write-Host "Earliest Zone date = " (Get-Date $ToDate -Format "yyyy-MM-dd")
+    $lastFilepath = $null
+    for ($date = $earliestMonthStart; $date -le $ToDate; $date = $date.AddMonths(1)){   
+            $filepath = "tado-zones-"+(Get-Date $date -Format "yyyy-MM") + ".json"
+            Write-Host "Checking for file $filepath" -NoNewline
+            $getMonth = $false
+            if (Test-Path $filepath) {
+                Write-Host " ... Found"
+                if ($ToDate -lt $date.AddMonths(1)) {
+                    $getMonth = $true
+                }
+            }
+            elseif($lastFilepath){
+                Write-Host " ... not found, and last file is $lastFilepath"
+            }
+            else{
+                Write-Host " ... not found."
+                $getMonth = $true
+            }
+            if ($getMonth) {
+                $lastDay = $date.AddMonths(1).AddDays(-1)
+                if ($lastDay -gt $ToDate) {
+                    $lastDay = $ToDate
+                }
+                Write-Host "Getting month data for $date to $lastDay"
+                Export-TadoData -FromDate $date -ToDate $lastDay
+            }
+            $lastFilepath = $filepath
+    }
+
 }
 
 function Export-TadoData {
@@ -105,19 +161,20 @@ function Export-TadoData {
         [datetime] $ToDate = (Get-Date),
         [string] $FilePath
     )
+    $ToDate = Get-Date -Year $ToDate.Year -Month $ToDate.Month -Day $ToDate.Day
     if (!$FromDate) {
         $FromDate = Get-Date -Year $ToDate.Year -Month $ToDate.Month -Day 1
     }
     if (!$FilePath) {
-        $FilePath = "tado-zones-" + (Get-Date $ToDate -Format "yyyy-MM-dd") + ".json"
+        $FilePath = "tado-zones-" + (Get-Date $ToDate -Format "yyyy-MM") + ".json"
     }
-    $token = Get-TadoSessionToken -Force
+    $token = Get-TadoAuthToken -Force
     Write-Host "Getting User details"
     $userDetails = Get-TadoApiCall "me"
     $homeId = $userDetails.homes.id
     Write-Host "Getting Zones"
     $zones = Get-TadoApiCall "homes/$homeid/zones"
-    $date = $FromDate
+    Write-Host " ... Found $($zones.Length)"
     $results = [PSCustomObject]@{
         zones              = @()
         hotWaterProduction = $null
@@ -129,9 +186,16 @@ function Export-TadoData {
         $callForHeat = @()
         $hotWaterProduction = @()
         $weather = @()
-        for ($date = $FromDate; $date -le $ToDate; $date = $date.AddDays(1)) {
+        if ((Get-Date $zone.dateCreated) -gt $FromDate) {
+            $startDate = Get-Date $zone.dateCreated
+        }
+        else {
+            $startDate = $FromDate
+        }
+        Write-Host "$($zone.name) from $startDate to $ToDate"
+        for ($date = $startDate; $date -le $ToDate; $date = $date.AddDays(1)) {
             $dateString = Get-Date $date -Format "yyyy-MM-dd"
-            $measurements = Get-TadoApiCall "homes/$homeId/zones/$($zone.id)/dayReport?date:$dateString"
+            $measurements = Get-TadoApiCall "homes/$homeId/zones/$($zone.id)/dayReport?date=$dateString"
             $temperatures += $measurements.measuredData.insideTemperature.dataPoints
             $humidity += $measurements.measuredData.humidity.dataPoints
             $callForHeat += $measurements.callForHeat.dataIntervals
@@ -152,6 +216,7 @@ function Export-TadoData {
         $zone | Add-Member -MemberType NoteProperty -Name "measurements" -Value $measurements -Force
         $results.zones += $zone
     }
+    Write-Host "Writing data to $FilePath"
     $results | ConvertTo-Json -Depth 99 -Compress | Out-File $FilePath -Encoding utf8
     $results
 }
