@@ -93,85 +93,194 @@ function Get-TadoApiCall {
         "Accept"        = "application/json"
         "Authorization" = "Bearer $((Get-TadoAuthToken).access_token)"
     }
-    Write-Host "Calling $uri"
+    Write-Verbose "Calling $uri"
     Invoke-RestMethod -Uri $uri -Headers $headers
 }
-function Export-TadoMonthDataToFile{
-    [CmdletBinding()]
-    param (
-        [Parameter()]
-        [datetime] $FromDate,
-        [datetime] $ToDate = (Get-Date),
-        [string] $FilePath
-    )
-    $ToDate = Get-Date -Year $ToDate.Year -Month $ToDate.Month -Day $ToDate.Day
-    
-    # Read existing files to check for missing months
-    # going back to the earliest date
 
-    if (!$FromDate) {
-        $FromDate = Get-Date -Year $ToDate.Year -Month $ToDate.Month -Day 1
+function Get-TadoHomeId {
+    if (!$script:tadoHomeId) {
+        Write-Host "Getting User details"
+        $userDetails = Get-TadoApiCall "me"
+        $script:tadoHomeId = $userDetails.homes.id
     }
-    $token = Get-TadoAuthToken -Force
-    Write-Host "Getting User details"
-    $userDetails = Get-TadoApiCall "me"
-    $homeId = $userDetails.homes.id
+    $script:tadoHomeId
+}
+
+function Export-TadoZones {
+    $homeId = Get-TadoHomeId
     Write-Host "Getting Zones"
-    $zones = Get-TadoApiCall "homes/$homeid/zones"
-    
-    $earliestDate = ($zones.dateCreated | get-date | Measure-Object -Minimum).Minimum
-    $earliestMonthStart = Get-Date -Year $earliestDate.Year -Month $earliestDate.Month -Day 1
-    Write-Host "Earliest Zone date = " (Get-Date $ToDate -Format "yyyy-MM-dd")
-    $lastFilepath = $null
-    for ($date = $earliestMonthStart; $date -le $ToDate; $date = $date.AddMonths(1)){   
-            $filepath = "tado-zones-"+(Get-Date $date -Format "yyyy-MM") + ".json"
-            Write-Host "Checking for file $filepath" -NoNewline
-            $getMonth = $false
-            if (Test-Path $filepath) {
-                Write-Host " ... Found"
-                if ($ToDate -lt $date.AddMonths(1)) {
-                    $getMonth = $true
-                }
-            }
-            elseif($lastFilepath){
-                Write-Host " ... not found, and last file is $lastFilepath"
-            }
-            else{
-                Write-Host " ... not found."
-                $getMonth = $true
-            }
-            if ($getMonth) {
-                $lastDay = $date.AddMonths(1).AddDays(-1)
-                if ($lastDay -gt $ToDate) {
-                    $lastDay = $ToDate
-                }
-                Write-Host "Getting month data for $date to $lastDay"
-                Export-TadoData -FromDate $date -ToDate $lastDay
-            }
-            $lastFilepath = $filepath
-    }
+    $zones = Get-TadoApiCall "homes/$homeId/zones"   
+    $zones | Add-Member -MemberType NoteProperty -Name "active" -Value $true -Force
 
+    # Merge current list of zones, with any older zones that no long exist.
+    $filepath = ".\tado-zones.json"
+    if (Test-Path $filepath) {
+        Write-Host "Reading previous list of Zones from '$filepath'"
+        $previousZones = Get-Content $filepath | ConvertFrom-Json
+        $existingZoneIds = $zones.id
+        $legacyZones = $previousZones | Where-Object { $existingZoneIds -NotContains $_.id } | ForEach-Object { $_.active = $false; $_ }
+        if ($legacyZones) {
+            $zones += $legacyZones
+        }
+    }
+    $zones | ConvertTo-Json -Depth 99 -Compress | Out-File $filepath -Encoding utf8
+    $zones
 }
 
 function Export-TadoData {
     [CmdletBinding()]
     param (
         [Parameter()]
+        [string] $DataDirectoryPath = '.\'
+    )
+    # Update Active Zones
+    $zones = Export-TadoZones
+    $activeZones = $zones | Where-Object active
+
+    # Search for existing months data
+    $months = Get-TadoMonthsToExport -Zones $activeZones -DataDirectoryPath $DataDirectoryPath
+
+    foreach ($month in $months) {
+        $monthData = Get-TadoMonthData -Zones $activeZones -DataDirectoryPath $DataDirectoryPath -Date $month
+        $filename = Get-TadoMonthFilename -DataDirectoryPath $DataDirectoryPath -Date $month
+        Write-Host "Writing data file $filename"
+        $monthData | ConvertTo-Json -Depth 99 -Compress | Out-File $filename -Encoding utf8 -Force
+    }
+
+}
+function Get-TadoMonthFilename {
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [string] $DataDirectoryPath = '.\',
+        [datetime] $Date
+    )
+    Join-Path $DataDirectoryPath ("tado-data-" + (Get-Date $Date -Format "yyyy-MM") + ".json")
+}
+
+function Get-TadoMonthData {
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [array] $Zones = (Get-TadoApiCall "homes/$(Get-TadoHomeId)/zones"),
+        [string] $DataDirectoryPath = '.\',
+        [datetime] $Date = (Get-Date)
+    )
+    $filename = Get-TadoMonthFilename -DataDirectoryPath $DataDirectoryPath -Date $Date
+
+    $dayData = @()
+    if (Test-Path $filename) {
+        $fileData = Get-Content $filename | ConvertFrom-Json
+
+        # Shift the startDate to the last day from the file, so we refetch that days day, onwards.
+        $startDate = ($fileData.date | Measure-Object -Maximum).Maximum
+        # Add all days before the last day in the file, to the output array
+        $dayData += $fileData | Where-Object date -lt $startDate
+    }
+    else {
+        $startDate = Get-Date -Year $Date.Year -Month $Date.Month -Day 1
+    }
+    # Set endDate to last day of the month
+    $endDate = (Get-Date -Year $Date.Year -Month $Date.Month -Day 1).AddMonths(1).AddDays(-1)
+
+    # Check if the endDate is greater than today.
+    $now = Get-Date
+    if ($now -lt $endDate) {
+        $endDate = $now.Date
+    }
+
+    Write-Host "Getting month data for $startDate to $endDate"
+    $dayData += Get-TadoData -Zones $activeZones -StartDate $startDate -EndDate $endDate
+
+    $dayData
+}
+
+function Get-TadoMonthsToExport {
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [array] $Zones = (Get-TadoApiCall "homes/$(Get-TadoHomeId)/zones"),
+        [string] $DataDirectoryPath = '.\'
+    )
+    $now = Get-Date
+    # Convert current DateTime to midnight today i.e. 00:00:00
+    $today = Get-Date -Year $now.Year -Month $now.Month -Day $now.Day
+    
+    # Find when the oldest zone was created
+    $earliestDate = ($Zones.dateCreated | get-date | Measure-Object -Minimum).Minimum
+    # Get the 1st of the month for the oldest zone
+    $earliestMonthStart = Get-Date -Year $earliestDate.Year -Month $earliestDate.Month -Day 1
+
+    Write-Host "Earliest Zone date = " (Get-Date $earliestDate -Format "yyyy-MM-dd")
+    # Walk up each month from the oldest zone create date, to this month,
+    # returning the 1st of the month for every month we need to fetch data for.
+    for ($date = $earliestMonthStart; $date -le $today; $date = $date.AddMonths(1)) {   
+        $filepath = Get-TadoMonthFilename -DataDirectoryPath $DataDirectoryPath -Date $date
+        Write-Host "Checking for file $filepath" -NoNewline
+        if (Test-Path $filepath) {
+            Write-Host " ... Found"
+            # If the file is for this months, it will need the latest data adding to it
+            if ($today -lt $date.AddMonths(1)) {
+                $date
+            }
+        }
+        else {
+            $date
+        }
+    }
+}
+
+function Get-TadoData {
+    [CmdletBinding()]
+    param (
+        [array] $Zones = (Get-TadoApiCall "homes/$(Get-TadoHomeId)/zones"),
+        [datetime] $StartDate,
+        [datetime] $EndDate = (Get-Date).Date
+    )
+    # Ensure start and end dates are at midnight on the day 00:00:00
+    if (!$StartDate) {
+        $StartDate = (Get-Date -Year $EndDate.Year -Month $EndDate.Month -Day 1).Date
+    }
+    else {
+        $StartDate = $StartDate.Date
+    }
+    $EndDate = $EndDate.Date
+    
+    $homeId = Get-TadoHomeId
+    Write-Host "Getting data from $StartDate to $EndData"
+    for ($date = $StartDate; $date -le $EndDate; $date = $date.AddDays(1)) {
+        $dateString = Get-Date $date -Format "yyyy-MM-dd"
+        Write-Host "Getting data for $dateString"
+        $zoneData = @()
+        foreach ($zone in ($Zones | where id -ne 0)) {
+
+            if ((Get-Date $zone.dateCreated) -lt $date.AddDays(1)) {
+                
+                Write-Host "Getting data for $dateString - Zone '$($zone.name)'"
+            
+                $zoneData += Get-TadoApiCall "homes/$homeId/zones/$($zone.id)/dayReport?date=$dateString"
+            }
+        }
+        # Return all zone data for this day
+        [PSCustomObject]@{
+            date  = Get-Date $date -Format "yyyy-MM-ddT00:00:00.000Z"
+            zones = $zoneData
+        }
+    }
+}
+
+function Get-TadoDataLegacy {
+    [CmdletBinding()]
+    param (
+        [array] $Zones = (Get-TadoApiCall "homes/$(Get-TadoHomeId)/zones"),
         [datetime] $FromDate,
-        [datetime] $ToDate = (Get-Date),
-        [string] $FilePath
+        [datetime] $ToDate = (Get-Date)
     )
     $ToDate = Get-Date -Year $ToDate.Year -Month $ToDate.Month -Day $ToDate.Day
     if (!$FromDate) {
         $FromDate = Get-Date -Year $ToDate.Year -Month $ToDate.Month -Day 1
     }
-    if (!$FilePath) {
-        $FilePath = "tado-zones-" + (Get-Date $ToDate -Format "yyyy-MM") + ".json"
-    }
-    $token = Get-TadoAuthToken -Force
-    Write-Host "Getting User details"
-    $userDetails = Get-TadoApiCall "me"
-    $homeId = $userDetails.homes.id
+    $homeId = Get-TadoHomeId
     Write-Host "Getting Zones"
     $zones = Get-TadoApiCall "homes/$homeid/zones"
     Write-Host " ... Found $($zones.Length)"
@@ -216,7 +325,6 @@ function Export-TadoData {
         $zone | Add-Member -MemberType NoteProperty -Name "measurements" -Value $measurements -Force
         $results.zones += $zone
     }
-    Write-Host "Writing data to $FilePath"
-    $results | ConvertTo-Json -Depth 99 -Compress | Out-File $FilePath -Encoding utf8
+
     $results
 }
