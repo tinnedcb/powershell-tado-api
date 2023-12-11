@@ -1,3 +1,26 @@
+$script:TadoConfigFilepath = Join-Path $env:USERPROFILE ".TadoApiConfig.json"
+function Set-TadoDataDirectory{
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$DataDirectory
+    )
+    $script:tadoConfig = [PSCustomObject]@{
+        DataDirectory = $DataDirectory
+    }
+    $script:tadoConfig | Out-File $script:TadoConfigFilepath -Encoding utf8 -Force
+}
+function Get-TadoDataDirectory{
+    if ($script:tadoConfig) {
+        $script:tadoConfig.DataDirectory
+    }
+    elseif(Test-Path $script:TadoConfigFilepath) {
+        $script:tadoConfig = Get-Content $script:TadoConfigFilepath | ConvertFrom-Json
+        $script:tadoConfig.DataDirectory
+    }
+    else{
+        '.\'
+    }
+}
 function Set-CredentialsToFile {
     param (
         [Parameter(Mandatory = $true)]
@@ -131,7 +154,7 @@ function Export-TadoData {
     [CmdletBinding()]
     param (
         [Parameter()]
-        [string] $DataDirectoryPath = '.\'
+        [string] $DataDirectoryPath = (Get-TadoDataDirectory)
     )
     # Update Active Zones
     $zones = Export-TadoZones
@@ -152,7 +175,7 @@ function Get-TadoMonthFilename {
     [CmdletBinding()]
     param (
         [Parameter()]
-        [string] $DataDirectoryPath = '.\',
+        [string] $DataDirectoryPath = (Get-TadoDataDirectory),
         [datetime] $Date
     )
     Join-Path $DataDirectoryPath ("tado-data-" + (Get-Date $Date -Format "yyyy-MM") + ".json")
@@ -163,7 +186,7 @@ function Get-TadoMonthData {
     param (
         [Parameter()]
         [array] $Zones = (Get-TadoApiCall "homes/$(Get-TadoHomeId)/zones"),
-        [string] $DataDirectoryPath = '.\',
+        [string] $DataDirectoryPath = (Get-TadoDataDirectory),
         [datetime] $Date = (Get-Date)
     )
     $filename = Get-TadoMonthFilename -DataDirectoryPath $DataDirectoryPath -Date $Date
@@ -200,7 +223,7 @@ function Get-TadoMonthsToExport {
     param (
         [Parameter()]
         [array] $Zones = (Get-TadoApiCall "homes/$(Get-TadoHomeId)/zones"),
-        [string] $DataDirectoryPath = '.\'
+        [string] $DataDirectoryPath = (Get-TadoDataDirectory)
     )
     $now = Get-Date
     # Convert current DateTime to midnight today i.e. 00:00:00
