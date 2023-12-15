@@ -1,5 +1,6 @@
 $script:TadoConfigFilepath = Join-Path $env:USERPROFILE ".TadoApiConfig.json"
-function Set-TadoDataDirectory{
+$script:TadoCredsFilepath = Join-Path $env:USERPROFILE ".TadoApiCreds.json"
+function Set-TadoDataDirectory {
     param (
         [Parameter(Mandatory = $true)]
         [string]$DataDirectory
@@ -7,27 +8,24 @@ function Set-TadoDataDirectory{
     $script:tadoConfig = [PSCustomObject]@{
         DataDirectory = $DataDirectory
     }
-    $script:tadoConfig | Out-File $script:TadoConfigFilepath -Encoding utf8 -Force
+    $script:tadoConfig | ConvertTo-Json | Out-File $script:TadoConfigFilepath -Encoding utf8 -Force
 }
-function Get-TadoDataDirectory{
+function Get-TadoDataDirectory {
     if ($script:tadoConfig) {
         $script:tadoConfig.DataDirectory
     }
-    elseif(Test-Path $script:TadoConfigFilepath) {
+    elseif (Test-Path $script:TadoConfigFilepath) {
         $script:tadoConfig = Get-Content $script:TadoConfigFilepath | ConvertFrom-Json
         $script:tadoConfig.DataDirectory
     }
-    else{
+    else {
         '.\'
     }
 }
 function Set-CredentialsToFile {
     param (
-        [Parameter(Mandatory = $true)]
         [System.Management.Automation.PSCredential]$Credential,
-
-        [Parameter(Mandatory = $true)]
-        [string]$FilePath
+        [string]$FilePath = $script:TadoCredsFilepath
     )
 
     # Convert the secure password to a secure string representation
@@ -45,8 +43,7 @@ function Set-CredentialsToFile {
 
 function Get-CredentialsFromFile {
     param (
-        [Parameter(Mandatory = $true)]
-        [string]$FilePath
+        [string]$FilePath = $script:TadoCredsFilepath
     )
 
     # Read the JSON content from the file
@@ -60,26 +57,35 @@ function Get-CredentialsFromFile {
 
     return $credentials
 }
+function Set-TadoDefaulCredentials {
+    Param(
+        [PSCredential] $Credentials = (Get-Credential -Message "Enter your Tado credentials")
+    )
+    Set-CredentialsToFile -Credential $Credentials -FilePath $script:TadoCredsFilepath
+}
+
 function Get-TadoCredentials {
     Param(
         [PSCredential] $Credentials, 
         [switch] $SaveCredsToFile
     )
-    $filePath = Join-Path $env:USERPROFILE ".TadoApiCreds.json"
-    
-    if (!$Credentials) {
-        if (Test-Path $filePath) {
-            $Credentials = Get-CredentialsFromFile -FilePath $filePath
+    if ($Credentials) {
+        $script:TadoCredentials = $Credentials
+        if ($SaveCredsToFile) {
+            Write-Host "Saving encrypted credentials to file"
+            Set-CredentialsToFile -Credential $Credentials -FilePath $filePath
+        }
+    }
+    else {
+        if (!$script:TadoCredentials -and (Test-Path $script:TadoCredsFilepath)) {
+            $script:TadoCredentials = Get-CredentialsFromFile -FilePath $script:TadoCredsFilepath
         }
         else {
-            $Credentials = (Get-Credential -Message "Enter your Tado credentials")
+            throw "No Tado Credentials found. Either pass these in with -Credentials, or save your Creds with Set-TadoDefaulCredentials"
         }
     }
-    if ($SaveCredsToFile) {
-        Write-Host "Saving encrypted credentials to file"
-        Set-CredentialsToFile -Credential $Credentials -FilePath $filePath
-    }
-    $Credentials
+
+    $script:TadoCredentials
 }
 function Get-TadoAuthToken {
     param([switch] $Force)
@@ -281,7 +287,9 @@ function Get-TadoData {
                 
                 Write-Host "Getting data for $dateString - Zone '$($zone.name)'"
             
-                $zoneData += Get-TadoApiCall "homes/$homeId/zones/$($zone.id)/dayReport?date=$dateString"
+                $zoneDayReport = Get-TadoApiCall "homes/$homeId/zones/$($zone.id)/dayReport?date=$dateString"
+                $zoneDayReport | Add-Member -MemberType NoteProperty -Name "zoneId" -Value $zone.id -Force
+                $zoneData += $zoneDayReport
             }
         }
         # Return all zone data for this day
@@ -350,4 +358,80 @@ function Get-TadoDataLegacy {
     }
 
     $results
+}
+$script:TimeIntervalMinutes = 5
+$script:frostTemperature = 5
+
+function ConvertTo-TadoSimplifiedFile {
+    $filenames = Join-Path (Get-TadoDataDirectory) "tado-data-*.json"
+    $dataMonths = Get-Item $filenames | Get-Content | ConvertFrom-Json
+
+    $allZoneDayReports = $dataMonths | % { $_ } | where zones | % { $_.zones }
+
+    $targetTemperature = $allZoneDayReports | % {
+        $zoneId = $_.zoneId
+        $_.stripes.dataIntervals | % {
+            $time = Get-Date $_.from
+            $time = Get-DateTimeRounded $time
+            $toTime = Get-Date $_.to
+            $toTime = Get-DateTimeRounded $toTime
+            if ($_.value.setting.temperature) {
+                $tempValue = $_.value.setting.temperature.celsius
+            }
+            else {
+                $tempValue = $script:frostTemperature
+            }
+            [pscustomobject]@{
+                zoneId    = $zoneId
+                timestamp = Get-Date ($time.AddMinutes(1)) -Format 'yyyy-MM-ddThh:mm:ss.000Z'
+                value     = $tempValue 
+            }
+            while ($time -le $toTime) {
+                [pscustomobject]@{
+                    zoneId    = $zoneId
+                    timestamp = Get-Date $time -Format 'yyyy-MM-ddThh:mm:ss.000Z'
+                    value     = $tempValue 
+                }
+
+                $time = $time.AddMinutes($script:TimeIntervalMinutes)
+            }
+            
+        } 
+    }
+    $temperatures = $allZoneDayReports | % {
+        $zoneId = $_.zoneId
+        $_.measuredData.insideTemperature.dataPoints | % { 
+            [pscustomobject]@{
+                zoneId    = $zoneId
+                timestamp = $_.timestamp
+                value     = $_.value.celsius 
+            } 
+        } 
+    }
+    $humidity = $allZoneDayReports | % {
+        $zoneId = $_.zoneId
+        $_.measuredData.humidity.dataPoints | % { 
+            [pscustomobject]@{
+                zoneId    = $zoneId
+                timestamp = $_.timestamp
+                value     = $_.value 
+            } 
+        } 
+    }
+    $filename = Join-Path (Get-TadoDataDirectory) "tado-measurements.json" 
+    [PSCustomObject]@{
+        temperature       = $temperatures
+        humidity          = $humidity
+        targetTemperature = $targetTemperature
+    } | ConvertTo-Json -Depth 99 -Compress | Out-File $filename -Encoding utf8 -Force
+
+}
+function Get-DateTimeRounded {
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [datetime] $dateTime,
+        [int] $RoundToMinutes = 15
+    )
+    $dateTime.AddMinutes(([int]($dateTime.Minute / $RoundToMinutes) * $RoundToMinutes) - $dateTime.Minute).AddSeconds(-$dateTime.Second)
 }
