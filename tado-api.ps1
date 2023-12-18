@@ -76,8 +76,8 @@ function Get-TadoCredentials {
             Set-CredentialsToFile -Credential $Credentials -FilePath $filePath
         }
     }
-    else {
-        if (!$script:TadoCredentials -and (Test-Path $script:TadoCredsFilepath)) {
+    elseif(!$script:TadoCredentials) {
+        if (Test-Path $script:TadoCredsFilepath) {
             $script:TadoCredentials = Get-CredentialsFromFile -FilePath $script:TadoCredsFilepath
         }
         else {
