@@ -203,6 +203,9 @@ function Get-TadoMonthData {
 
         # Shift the startDate to the last day from the file, so we refetch that days day, onwards.
         $startDate = ($fileData.date | Measure-Object -Maximum).Maximum
+        if (!$startDate) {
+            $startDate = $Date
+        }
         # Add all days before the last day in the file, to the output array
         $dayData += $fileData | Where-Object date -lt $startDate
     }
@@ -375,28 +378,30 @@ function ConvertTo-TadoSimplifiedFile {
             $time = Get-DateTimeRounded $time
             $toTime = Get-Date $_.to
             $toTime = Get-DateTimeRounded $toTime
-            if ($_.value.setting.temperature) {
-                $tempValue = $_.value.setting.temperature.celsius
-            }
-            else {
-                $tempValue = $script:frostTemperature
-            }
-            [pscustomobject]@{
-                zoneId    = $zoneId
-                timestamp = Get-Date ($time.AddMinutes(1)) -Format 'yyyy-MM-ddThh:mm:ss.000Z'
-                value     = $tempValue 
-            }
-            while ($time -le $toTime) {
+            if ($time -lt $toTime) {
+                if ($_.value.setting.temperature) {
+                    $tempValue = $_.value.setting.temperature.celsius
+                }
+                else {
+                    $tempValue = $script:frostTemperature
+                }
                 [pscustomobject]@{
                     zoneId    = $zoneId
-                    timestamp = Get-Date $time -Format 'yyyy-MM-ddThh:mm:ss.000Z'
+                    timestamp = Get-Date ($time.AddMinutes(1)) -Format 'yyyy-MM-ddTHH:mm:00.000Z'
                     value     = $tempValue 
                 }
-
                 $time = $time.AddMinutes($script:TimeIntervalMinutes)
+                while ($time -le $toTime) {
+                    [pscustomobject]@{
+                        zoneId    = $zoneId
+                        timestamp = Get-Date $time -Format 'yyyy-MM-ddTHH:mm:00.000Z'
+                        value     = $tempValue 
+                    }
+
+                    $time = $time.AddMinutes($script:TimeIntervalMinutes)
+                }     
             }
-            
-        } 
+        }
     }
     $temperatures = $allZoneDayReports | % {
         $zoneId = $_.zoneId
@@ -417,6 +422,8 @@ function ConvertTo-TadoSimplifiedFile {
                 value     = $_.value 
             } 
         } 
+                
+            
     }
     $filename = Join-Path (Get-TadoDataDirectory) "tado-measurements.json" 
     [PSCustomObject]@{
@@ -424,7 +431,6 @@ function ConvertTo-TadoSimplifiedFile {
         humidity          = $humidity
         targetTemperature = $targetTemperature
     } | ConvertTo-Json -Depth 99 -Compress | Out-File $filename -Encoding utf8 -Force
-
 }
 function Get-DateTimeRounded {
     [CmdletBinding()]
